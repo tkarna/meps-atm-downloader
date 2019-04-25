@@ -117,6 +117,10 @@ def load_harmonie_cube(date, var, start_time=None, end_time=None):
         msg = 'Wrong nb of time steps: {:}, expected {:}'.format(ntime, hours)
         assert ntime == hours, msg
 
+    # realize data
+    # this is better to do here as internet connection may fail
+    cube.data
+
     return cube
 
 
