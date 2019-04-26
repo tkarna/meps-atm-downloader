@@ -81,6 +81,15 @@ def constrain_cube_time(cube, start_time=None, end_time=None):
     return new_cube
 
 
+def assert_cube_valid_data(cube):
+    """
+    Asserts that cube contains non nan/inf/masked data.
+    """
+    if numpy.ma.is_masked(cube.data):
+        assert not cube.data.mask.any(), 'Some data is masked'
+    assert numpy.isfinite(cube.data).all(), 'Some data is nan or inf'
+
+
 def load_harmonie_cube(date, var, start_time=None, end_time=None):
     print('  downloading {:} for date {:}'.format(var, date))
     url = url_pattern.format(year=date.year, month=date.month,
@@ -123,9 +132,7 @@ def load_harmonie_cube(date, var, start_time=None, end_time=None):
     for c in cube.coords():
         c.points
 
-    # assert all data is valid
-    msg = 'Invalid values found'
-    assert numpy.all(numpy.isfinite(cube.data)), msg
+    assert_cube_valid_data(cube)
 
     return cube
 
@@ -188,6 +195,7 @@ def load_harmonie_month(start_date, var):
         cube = load_harmonie_cube_recursive(date, var, start_time, end_time)
         time_constrain = iris.Constraint(coord_values={'time': lambda t: date <= t.point <= end_time})
         cube = cube.extract(time_constrain)
+        assert_cube_valid_data(cube)
         print('Obtained data for {:} -> {:}'.format(
             get_cube_datetime(cube, 0), get_cube_datetime(cube, -1)))
         # clean unnecessary metadata
