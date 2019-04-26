@@ -120,6 +120,12 @@ def load_harmonie_cube(date, var, start_time=None, end_time=None):
     # realize data
     # this is better to do here as internet connection may fail
     cube.data
+    for c in cube.coords():
+        c.points
+
+    # assert all data is valid
+    msg = 'Invalid values found'
+    assert numpy.all(numpy.isfinite(cube.data)), msg
 
     return cube
 
