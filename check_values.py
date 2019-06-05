@@ -1,10 +1,12 @@
 import iris
 import numpy
+import os
 
 
 def check_file(f):
 
     print('Loading file {:}'.format(f))
+    assert os.path.isfile(f), 'File not found: {:}'.format(f)
     cube_list = iris.load(f)
 
     for cube in cube_list:
@@ -33,8 +35,9 @@ if __name__ == '__main__':
         description='Check validity of netcdf file',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument('ncfile',
+    parser.add_argument('ncfile', nargs='+',
                         help='netCDF file to check.')
     args = parser.parse_args()
 
-    check_file(args.ncfile)
+    for f in args.ncfile:
+        check_file(f)
