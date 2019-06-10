@@ -103,9 +103,14 @@ def load_harmonie_cube(date, var, start_time=None, end_time=None):
     cube = cube[:, 0, :, :, :]
     # take first realization
     cube = cube[:, 0, :, :]
-    cube.remove_coord('projection_x_coordinate')
-    cube.remove_coord('projection_y_coordinate')
+
     cube.remove_coord('realization')
+
+    # fix x/y coordinate metadata, needed for iris regridding
+    cube.coord('projection_y_coordinate').coord_system.false_easting = 0.0
+    cube.coord('projection_y_coordinate').coord_system.false_northing = 0.0
+    cube.coord('projection_x_coordinate').coord_system.false_easting = 0.0
+    cube.coord('projection_x_coordinate').coord_system.false_northing = 0.0
 
     time_coord = cube.coord('time')
     if time_coord not in cube.dim_coords:
@@ -203,15 +208,40 @@ def load_harmonie_month(start_date, var):
         cube.attributes.pop('max_time')
         cube.attributes.pop('_ChunkSizes')
         cube_list.append(cube)
-    equalise_attributes(cube_list)
-    cube = cube_list.concatenate_cube()
+    for i, c in enumerate(cube_list):
+        iris.save(c, 'cube_{:04d}.nc'.format(i))
+    try:
+        equalise_attributes(cube_list)
+        cube = cube_list.concatenate_cube()
+    except iris.exceptions.ConcatenateError:
+        # concatenation failed, assuming mismatching grids
+        # regrid on the grid of the last time stamp
+        target = cube_list[-1]
+        new_list = iris.cube.CubeList()
+        for c in cube_list:
+            if c.shape[1:] == target.shape[:1]:
+                # grid matches
+                new_list.append(c)
+            else:
+                scheme = iris.analysis.Linear(extrapolation_mode='mask')
+                c_regrid = c.regrid(target, scheme)
+                new_list.append(c_regrid)
+        equalise_attributes(new_list)
+        cube = new_list.concatenate_cube()
+        # add lat lon coords from target grid
+        lat = target.coord('latitude')
+        lon = target.coord('longitude')
+        cube.add_aux_coord(lat, (1, 2))
+        cube.add_aux_coord(lon, (1, 2))
+        print(cube)
+
     return cube
 
 
 name = 'harmonie'
 # fetch for these months (end inclusive)
-start_date = datetime.datetime(2017, 4, 1)
-end_date = datetime.datetime(2017, 6, 1)
+start_date = datetime.datetime(2017, 9, 1)
+end_date = datetime.datetime(2017, 12, 1)
 
 var_list = [
     'T2m',
