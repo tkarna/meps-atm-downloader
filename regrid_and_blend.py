@@ -26,19 +26,30 @@ def get_nemo_grid():
     return xr.Dataset({'lat': (['lat'], lat), 'lon': (['lon'], lon)})
 
 
-def _load_field(date, var, prefix):
-    filename = '{prefix:}_{var:}_y{year:}m{month:02d}.nc'.format(
-        prefix=prefix, var=var, year=date.year, month=date.month)
+def _load_field(date, var, prefix, mode):
+
+    if mode == 'monthly':
+        date_str = date.strftime('y%Ym%m')
+    elif mode == 'daily':
+        date_str = date.strftime('y%Ym%md%d')
+    elif mode == 'no-merge':
+        date_str = date.strftime('y%Ym%md%d-%H')
+    else:
+        raise ValueError('Invalid mode: {:}'.format(mode))
+
+    filename = '{prefix:}_{var:}_{date:}.nc'.format(
+        prefix=prefix, var=var, date=date_str)
+
     print('Loading {:}'.format(filename))
     ds = xr.open_dataset(filename)
     return ds
 
 
-def load_harmonie_field(date, var):
+def load_harmonie_field(date, var, mode):
     """
     Load Harmonie atm field from netCDF in to xarray.
     """
-    ds = _load_field(date, var, 'harmonie')
+    ds = _load_field(date, var, 'harmonie', mode)
     ds = ds.rename({'longitude': 'lon', 'latitude': 'lat'})
     # drop unnecessary coordinates
     keep_coords = ['time', 'lon', 'lat']
@@ -52,11 +63,11 @@ def load_harmonie_field(date, var):
     return dr
 
 
-def load_ecmwf_field(date, var):
+def load_ecmwf_field(date, var, mode):
     """
     Load ECMWF atm field from netCDF in to xarray.
     """
-    ds = _load_field(date, var, 'ecmwf')
+    ds = _load_field(date, var, 'ecmwf', mode)
     # take the first variable
     variables = [v for v in ds.variables if v not in ['lat', 'lon', 'time']]
     var = variables[0]
@@ -92,7 +103,8 @@ def get_blend_mask(data_array, regridder, buffer=20):
     return blend_mask
 
 
-def merge_monthly_files(date, var, grid_target, fileprefix):
+def merge_monthly_files(date, var, grid_target, fileprefix,
+                        mode='monthly'):
     """
     Reads two atm fields, regrids them on the model grid, and blends them.
 
@@ -105,47 +117,78 @@ def merge_monthly_files(date, var, grid_target, fileprefix):
     Produces a blended field on Nemo grid:
     {fileprefix}_T2m_y2016m11.nc ...
     """
-    field_coarse = load_ecmwf_field(date, var)
+    field_coarse = load_ecmwf_field(date, var, mode='monthly')
     regridder_coarse = xe.Regridder(field_coarse, grid_target, 'bilinear',
                                     reuse_weights=True)
 
-    field_fine = load_harmonie_field(date, var)
+    field_fine = load_harmonie_field(date, var, mode)
     regridder_fine = xe.Regridder(field_fine, grid_target, 'bilinear', reuse_weights=True)
 
     blend_mask = get_blend_mask(field_fine, regridder_fine)
 
     # blend each time slice separately (saves memory)
     slice_list = []
-    for sdate, coarse_slice in field_coarse.groupby('time'):
+    # NOTE loop over coarse time stamps
+    # for sdate, coarse_slice in field_coarse.groupby('time'):
+    #     # make new slice by regridding coarse field
+    #     new_slice = regridder_coarse(coarse_slice)
+    #     source_str = 'coarse'
+    #     try:
+    #         fine_slice = field_fine.sel(time=sdate)
+    #         new_fine_slice = regridder_fine(fine_slice)
+    #         new_slice.values[:] = (
+    #             blend_mask*new_fine_slice.values +
+    #             (1. - blend_mask)*new_slice.values
+    #         )
+    #         source_str += ' + fine'
+    #     except KeyError as e:
+    #         fine_slice = None
+    #     print('{:}: {:}'.format(sdate, source_str))
+    #     slice_list.append(new_slice)
+
+    # NOTE loop over fine time stamps
+    for sdate, fine_slice in field_fine.groupby('time'):
         # make new slice by regridding coarse field
+        coarse_slice = field_coarse.sel(time=sdate)
         new_slice = regridder_coarse(coarse_slice)
         source_str = 'coarse'
-        try:
-            fine_slice = field_fine.sel(time=sdate)
-            new_fine_slice = regridder_fine(fine_slice)
-            new_slice.values[:] = (
-                blend_mask*new_fine_slice.values +
-                (1. - blend_mask)*new_slice.values
-            )
-            source_str += ' + fine'
-        except KeyError as e:
-            fine_slice = None
+
+        new_fine_slice = regridder_fine(fine_slice)
+        new_slice.values[:] = (
+            blend_mask*new_fine_slice.values +
+            (1. - blend_mask)*new_slice.values
+        )
+        source_str += ' + fine'
+
         print('{:}: {:}'.format(sdate, source_str))
         slice_list.append(new_slice)
+
     # concatenate time slices
     regridded_field = xr.concat(slice_list, dim='time')
 
     # make output dataset
-    time_array = field_coarse['time']
+    # time_array = field_coarse['time']
+    time_array = field_fine['time']
     lat_array = grid_target['lat']
     lon_array = grid_target['lon']
     coordinates = {'time': time_array, 'lat': lat_array, 'lon': lon_array}
     ds_out = xr.Dataset({var: (['time', 'lat', 'lon'], regridded_field)},
                         coords=coordinates)
     print(ds_out)
+    # workaround to fix write: RuntimeError: NetCDF: Invalid argument
+    # this is related to using unliminted_dims arg
+    ds_out.time.encoding.pop('contiguous', None)
 
-    outfile = '{:}_{:}_y{:04d}m{:02d}.nc'.format(
-        fileprefix, var, date.year, date.month)
+    if mode == 'monthly':
+        date_str = date.strftime('y%Ym%m')
+    elif mode == 'daily':
+        date_str = date.strftime('y%Ym%md%d')
+    elif mode == 'no-merge':
+        date_str = date.strftime('y%Ym%md%d-%H')
+    else:
+        raise ValueError('Invalid mode: {:}'.format(mode))
+    outfile = r'{:}_{:}_{:}.nc'.format(
+        fileprefix, var, date_str)
     print('Saving to {:}'.format(outfile))
     ds_out.to_netcdf(path=outfile, mode='w', format='NETCDF4',
                      unlimited_dims={'time': True})
@@ -156,8 +199,8 @@ fileprefix = 'harmonie-blend'
 grid_target = get_nemo_grid()
 
 # months to process, end inclusive
-start_date = datetime.datetime(2016, 11, 1)
-end_date = datetime.datetime(2017, 6, 1)
+start_date = datetime.datetime(2017, 9, 1)
+end_date = datetime.datetime(2017, 9, 30)
 
 var_list = [
     'T2m',
@@ -166,8 +209,22 @@ var_list = [
     'sfcpres',
 ]
 
-for date in dateutil.rrule.rrule(dateutil.rrule.MONTHLY,
+# choose to process daily or monthly or 6-hour files
+# mode = 'monthly'
+# mode = 'daily'
+mode = 'no-merge'
+
+rule_dict = {
+    'monthly': (dateutil.rrule.MONTHLY, 1),
+    'daily': (dateutil.rrule.DAILY, 1),
+    'no-merge': (dateutil.rrule.HOURLY, 6),
+}
+
+rule, interval = rule_dict[mode]
+for date in dateutil.rrule.rrule(rule,
+                                 interval=interval,
                                  dtstart=start_date,
                                  until=end_date):
+    print('processing {:}'.format(date))
     for var in var_list:
-        merge_monthly_files(date, var, grid_target, fileprefix)
+        merge_monthly_files(date, var, grid_target, fileprefix, mode)

@@ -9,7 +9,8 @@ import warnings
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-url_pattern = 'http://thredds.met.no/thredds/dodsC/meps25epsarchive/{year:}/{month:02d}/{day:02d}/meps_subset_2_5km_{year:}{month:02d}{day:02d}T{hour:02d}Z.nc'
+# url_pattern = 'http://thredds.met.no/thredds/dodsC/meps25epsarchive/{year:}/{month:02d}/{day:02d}/meps_subset_2_5km_{year:}{month:02d}{day:02d}T{hour:02d}Z.nc'
+url_pattern = 'https://thredds.met.no/thredds/dodsC/meps25epsarchive/{year:}/{month:02d}/{day:02d}/meps_subset_2_5km_{year:}{month:02d}{day:02d}T{hour:02d}Z.nc'
 
 st_name_map = {
     'T2m': 'air_temperature',
@@ -71,13 +72,23 @@ def constrain_cube_time(cube, start_time=None, end_time=None):
         end_time = get_cube_datetime(cube, -1)
     # convert to float in cube units
     time_coord = cube.coord('time')
-    assert end_time >= get_cube_datetime(cube, 0), \
+    st = time_coord.units.date2num(start_time)
+    et = time_coord.units.date2num(end_time)
+    assert et >= time_coord.points[0], \
         'No overlapping time period found. end_time before first time stamp.'
-    assert start_time <= get_cube_datetime(cube, -1), \
+    assert st <= time_coord.points[-1], \
         'No overlapping time period found. start_time after last time stamp.'
-    time_constrain = iris.Constraint(
-        coord_values={'time': lambda t: start_time <= t.point <= end_time})
-    new_cube = cube.extract(time_constrain)
+    t = time_coord.points
+    ix = numpy.logical_and(t >= st, t <= et)
+    shape = cube.shape
+    extract = [slice(None)] * len(shape)
+    t_index = cube.coord_dims('time')[0]
+    if not numpy.any(ix):
+        print(cube)
+        print(start_time, end_time)
+        print(get_cube_datetime(cube, 0), get_cube_datetime(cube, -1))
+    extract[t_index] = ix
+    new_cube = cube[tuple(extract)]
     return new_cube
 
 
@@ -186,10 +197,17 @@ def load_harmonie_cube_recursive(date, var, start_time=None, end_time=None,
     return cube
 
 
-def load_harmonie_month(start_date, var):
+def load_harmonie_month(start_date, var, mode='monthly'):
     cube_list = iris.cube.CubeList()
     hours = 6
-    last_date = start_date + relativedelta(months=1, hours=-hours)
+    if mode == 'monthly':
+        last_date = start_date + relativedelta(months=1, hours=-hours)
+    elif mode == 'daily':
+        last_date = start_date + relativedelta(days=1, hours=-hours)
+    elif mode == 'no-merge':
+        last_date = start_date
+    else:
+        raise ValueError('Invalid mode: {:}'.format(mode))
     rule = dateutil.rrule.rrule(freq=dateutil.rrule.HOURLY, interval=hours,
                                 dtstart=start_date, until=last_date)
     for date in rule:
@@ -208,32 +226,8 @@ def load_harmonie_month(start_date, var):
         cube.attributes.pop('max_time')
         cube.attributes.pop('_ChunkSizes')
         cube_list.append(cube)
-    for i, c in enumerate(cube_list):
-        iris.save(c, 'cube_{:04d}.nc'.format(i))
-    try:
-        equalise_attributes(cube_list)
-        cube = cube_list.concatenate_cube()
-    except iris.exceptions.ConcatenateError:
-        # concatenation failed, assuming mismatching grids
-        # regrid on the grid of the last time stamp
-        target = cube_list[-1]
-        new_list = iris.cube.CubeList()
-        for c in cube_list:
-            if c.shape[1:] == target.shape[:1]:
-                # grid matches
-                new_list.append(c)
-            else:
-                scheme = iris.analysis.Linear(extrapolation_mode='mask')
-                c_regrid = c.regrid(target, scheme)
-                new_list.append(c_regrid)
-        equalise_attributes(new_list)
-        cube = new_list.concatenate_cube()
-        # add lat lon coords from target grid
-        lat = target.coord('latitude')
-        lon = target.coord('longitude')
-        cube.add_aux_coord(lat, (1, 2))
-        cube.add_aux_coord(lon, (1, 2))
-        print(cube)
+    equalise_attributes(cube_list)
+    cube = cube_list.concatenate_cube()
 
     return cube
 
@@ -241,7 +235,7 @@ def load_harmonie_month(start_date, var):
 name = 'harmonie'
 # fetch for these months (end inclusive)
 start_date = datetime.datetime(2017, 9, 1)
-end_date = datetime.datetime(2017, 12, 1)
+end_date = datetime.datetime(2017, 9, 2)
 
 var_list = [
     'T2m',
@@ -253,21 +247,35 @@ var_list = [
     'sfcpres',
 ]
 
+# choose to store daily or monthly or 6-hour files
+# mode = 'monthly'
+mode = 'daily'
+#mode = 'no-merge'
 
-for date in dateutil.rrule.rrule(dateutil.rrule.MONTHLY,
+rule_dict = {
+    'monthly': (dateutil.rrule.MONTHLY, 1),
+    'daily': (dateutil.rrule.DAILY, 1),
+    'no-merge': (dateutil.rrule.HOURLY, 6),
+}
+
+rule, interval = rule_dict[mode]
+for date in dateutil.rrule.rrule(rule,
+                                 interval=interval,
                                  dtstart=start_date,
                                  until=end_date):
     for var in var_list:
-        #try:
-            cube = load_harmonie_month(date, var)
-            print(cube)
-            print('Time span {:} -> {:}'.format(
-                get_cube_datetime(cube, 0), get_cube_datetime(cube, -1)))
-            filename = '{name:}_{var:}_y{year:}m{month:02d}.nc'.format(
-                name=name, var=var, year=date.year, month=date.month)
-            print('Saving {:}'.format(filename))
-            iris.save(cube, filename)
-        #except Exception as e:
-           #print('Failed {:} {:}'.format(var, date))
-           #print(e)
-
+        cube = load_harmonie_month(date, var, mode=mode)
+        print('Time span {:} -> {:}'.format(
+            get_cube_datetime(cube, 0), get_cube_datetime(cube, -1)))
+        if mode == 'monthly':
+            date_str = date.strftime('y%Ym%m')
+        elif mode == 'daily':
+            date_str = date.strftime('y%Ym%md%d')
+        elif mode == 'no-merge':
+            date_str = date.strftime('y%Ym%md%d-%H')
+        else:
+            raise ValueError('Invalid mode: {:}'.format(mode))
+        filename = '{name:}_{var:}_{date:}.nc'.format(
+            name=name, var=var, date=date_str)
+        print('Saving {:}'.format(filename))
+        iris.save(cube, filename)
